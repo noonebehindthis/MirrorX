@@ -2,19 +2,20 @@ import requests
 from telegram.ext import CommandHandler
 from telegram import InlineKeyboardMarkup
 
-from bot import Interval, INDEX_URL, BUTTON_THREE_NAME, BUTTON_THREE_URL, BUTTON_FOUR_NAME, BUTTON_FOUR_URL, BUTTON_FIVE_NAME, BUTTON_FIVE_URL, BLOCK_MEGA_LINKS
+from bot import Interval, INDEX_URL, BUTTON_THREE_NAME, BUTTON_THREE_URL, BUTTON_FOUR_NAME, BUTTON_FOUR_URL, BUTTON_FIVE_NAME, BUTTON_FIVE_URL, BLOCK_MEGA_LINKS, MEGA_KEY
 from bot import dispatcher, DOWNLOAD_DIR, DOWNLOAD_STATUS_UPDATE_INTERVAL, download_dict, download_dict_lock, SHORTENER, SHORTENER_API
 from bot.helper.ext_utils import fs_utils, bot_utils
 from bot.helper.ext_utils.bot_utils import setInterval
 from bot.helper.ext_utils.exceptions import DirectDownloadLinkException, NotSupportedExtractionArchive
 from bot.helper.mirror_utils.download_utils.aria2_download import AriaDownloadHelper
-from bot.helper.mirror_utils.download_utils.mega_downloader import MegaDownloadHelper
+from bot.helper.mirror_utils.download_utils.mega_download import MegaDownloader
 from bot.helper.mirror_utils.download_utils.direct_link_generator import direct_link_generator
 from bot.helper.mirror_utils.download_utils.telegram_downloader import TelegramDownloadHelper
 from bot.helper.mirror_utils.status_utils import listeners
 from bot.helper.mirror_utils.status_utils.extract_status import ExtractStatus
 from bot.helper.mirror_utils.status_utils.tar_status import TarStatus
 from bot.helper.mirror_utils.status_utils.upload_status import UploadStatus
+from bot.helper.mirror_utils.status_utils.gdownload_status import DownloadStatus
 from bot.helper.mirror_utils.upload_utils import gdriveTools
 from bot.helper.telegram_helper.bot_commands import BotCommands
 from bot.helper.telegram_helper.filters import CustomFilters
@@ -26,6 +27,8 @@ import os
 import subprocess
 import threading
 import re
+import random
+import string
 
 ariaDlManager = AriaDownloadHelper()
 ariaDlManager.start_listener()
@@ -149,13 +152,13 @@ class MirrorListener(listeners.MirrorListeners):
 
     def onUploadComplete(self, link: str, size):
         with download_dict_lock:
-            msg = f'<b>Filename : </b><code>{download_dict[self.uid].name()}</code>\n<b>Size : </b><code>{size}</code>'
+            msg = f'<b>Name:- </b><code>{download_dict[self.uid].name()}</code>\n<b>Size:- </b><code>{size}</code>'
             buttons = button_build.ButtonMaker()
             if SHORTENER is not None and SHORTENER_API is not None:
                 surl = requests.get(f'https://{SHORTENER}/api?api={SHORTENER_API}&url={link}&format=text').text
-                buttons.buildbutton("💾Drive Link💾", surl)
+                buttons.buildbutton("Drive Link", surl)
             else:
-                buttons.buildbutton("💾Drive Link💾", link)
+                buttons.buildbutton("Drive Link", link)
             LOGGER.info(f'Done Uploading {download_dict[self.uid].name()}')
             if INDEX_URL is not None:
                 url_path = requests.utils.quote(f'{download_dict[self.uid].name()}')
@@ -164,9 +167,9 @@ class MirrorListener(listeners.MirrorListeners):
                     share_url += '/'
                 if SHORTENER is not None and SHORTENER_API is not None:
                     siurl = requests.get(f'https://{SHORTENER}/api?api={SHORTENER_API}&url={share_url}&format=text').text
-                    buttons.buildbutton("🚀Index Link🚀", siurl)
+                    buttons.buildbutton("Index Link", siurl)
                 else:
-                    buttons.buildbutton("🚀Index Link🚀", share_url)
+                    buttons.buildbutton("Index Link", share_url)
             if BUTTON_THREE_NAME is not None and BUTTON_THREE_URL is not None:
                 buttons.buildbutton(f"{BUTTON_THREE_NAME}", f"{BUTTON_THREE_URL}")
             if BUTTON_FOUR_NAME is not None and BUTTON_FOUR_URL is not None:
@@ -178,7 +181,7 @@ class MirrorListener(listeners.MirrorListeners):
             else:
                 uname = f'<a href="tg://user?id={self.message.from_user.id}">{self.message.from_user.first_name}</a>'
             if uname is not None:
-                msg += f'\n\nReq. By 👉 : {uname}'
+                msg += f'\n\nReq. By:- {uname}'
             try:
                 fs_utils.clean_download(download_dict[self.uid].path())
             except FileNotFoundError:
@@ -273,15 +276,34 @@ def _mirror(bot, update, isTar=False, extract=False):
     except DirectDownloadLinkException as e:
         LOGGER.info(f'{link}: {e}')
     listener = MirrorListener(bot, update, pswd, isTar, tag, extract)
-    if bot_utils.is_mega_link(link):
+    if bot_utils.is_gdrive_link(link):
+        if not isTar and not extract:
+            sendMessage(f"Use /{BotCommands.CloneCommand} To Copy File/Folder", bot, update)
+            return
+        res, size, name = gdriveTools.GoogleDriveHelper().clonehelper(link)
+        if res != "":
+            sendMessage(res, bot, update)
+            return
+        LOGGER.info(f"Download Name : {name}")
+        drive = gdriveTools.GoogleDriveHelper(name, listener)
+        gid = ''.join(random.SystemRandom().choices(string.ascii_letters + string.digits, k=12))
+        download_status = DownloadStatus(drive, size, listener, gid)
+        with download_dict_lock:
+            download_dict[listener.uid] = download_status
+        if len(Interval) == 0:
+            Interval.append(setInterval(DOWNLOAD_STATUS_UPDATE_INTERVAL, update_all_messages))
+        sendStatusMessage(update, bot)
+        drive.download(link)
+
+    elif bot_utils.is_mega_link(link) and MEGA_KEY is not None:
         if BLOCK_MEGA_LINKS:
-            sendMessage("Mega Links Are Blocked ✋", bot, update)
+            sendMessage("Mega Links Are Blocked.", bot, update)
         else:
-            mega_dl = MegaDownloadHelper()
-            mega_dl.add_download(link, f'{DOWNLOAD_DIR}/{listener.uid}/', listener)
+            mega_dl = MegaDownloader(listener)
+            mega_dl.add_download(link, f'{DOWNLOAD_DIR}{listener.uid}/')
             sendStatusMessage(update, bot)
     else:
-        ariaDlManager.add_download(link, f'{DOWNLOAD_DIR}/{listener.uid}/', listener, name)
+        ariaDlManager.add_download(link, f'{DOWNLOAD_DIR}{listener.uid}/', listener, name)
         sendStatusMessage(update, bot)
     if len(Interval) == 0:
         Interval.append(setInterval(DOWNLOAD_STATUS_UPDATE_INTERVAL, update_all_messages))
